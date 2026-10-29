@@ -1,0 +1,1575 @@
+// ==================== 1. FIREBASE КОНФІГУРАЦІЯ ТА АДМІНІСТРАТОРИ ====================
+const ADMIN_EMAILS = [
+    "infuzoreon@gmail.com",
+    "brigadir1904@gmail.com"
+];
+
+const firebaseConfig = {
+    apiKey: "AIzaSyCVLcsYco4DwKniOFmxsJjF5ouwBpB7JKM",
+    authDomain: "myuni-nakkkim.firebaseapp.com",
+    projectId: "myuni-nakkkim",
+    storageBucket: "myuni-nakkkim.firebasestorage.app",
+    messagingSenderId: "489120052043",
+    appId: "1:489120052043:web:ece683bf77dd6788612ece",
+    measurementId: "G-6FX9CVNF3G"
+};
+
+// Ініціалізація Firebase SDK (працює через сумісний шар compat)
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+let currentUser = null;
+let isSignUpMode = false;
+
+function isAdmin() {
+    return currentUser && currentUser.email && ADMIN_EMAILS.some(e => e.toLowerCase() === currentUser.email.toLowerCase());
+}
+
+// ==================== 2. БАЗА ДАНИХ РОЗКЛАДУ НАКККІМ ====================
+// Розклад занять на основі наданого графіка кафедри/акторів
+const defaultScheduleDays = [
+    { day: 'Понеділок', time: '08:30–09:50', subject: 'Танець', type: 'Практика', teacher: '', room: '', link: '' },
+    { day: 'Понеділок', time: '10:00–11:20', subject: 'Танець', type: 'Практика', teacher: '', room: '', link: '' },
+    { day: 'Понеділок', time: '13:10–14:30', subject: 'Теорія драми', type: 'Лекція', teacher: '', room: '', link: '' },
+    { day: 'Понеділок', time: '14:40–16:00', subject: 'Теорія драми', type: 'Семінар', teacher: '', room: '', link: '' },
+
+    { day: 'Вівторок', time: '10:00–11:20', subject: 'Майстерність', type: 'Практика', teacher: 'Гирич', room: '', link: '' },
+    { day: 'Вівторок', time: '11:30–12:50', subject: 'Майстерність', type: 'Практика', teacher: 'Гирич', room: '', link: '' },
+    { day: 'Вівторок', time: '13:10–14:30', subject: 'Майстерність', type: 'Практика', teacher: 'Гирич', room: '', link: '' },
+    { day: 'Вівторок', time: '14:40–16:00', subject: 'Майстерність', type: 'Практика', teacher: 'Гирич', room: '', link: '' },
+    { day: 'Вівторок', time: '16:10–17:30', subject: 'Вокал', type: 'Практика', teacher: 'Індивідуально', room: '', link: '' },
+    { day: 'Вівторок', time: '17:40–19:00', subject: 'Вокал', type: 'Практика', teacher: 'Індивідуально', room: '', link: '' },
+
+    { day: 'Середа', time: '08:30–09:50', subject: 'Історія зарубіжного театру', type: 'Лекція', teacher: '', room: '', link: '' },
+    { day: 'Середа', time: '10:00–11:20', subject: 'Історія зарубіжного театру', type: 'Семінар', teacher: '', room: '', link: '' },
+    { day: 'Середа', time: '11:30–12:50', subject: 'Ритмопластика', type: 'Практика', teacher: '', room: '', link: '' },
+
+    { day: 'Четвер', time: '10:00–11:20', subject: 'Національний спротив', type: 'Лекція', teacher: '', room: '', link: '' },
+    { day: 'Четвер', time: '11:30–12:50', subject: 'Національний спротив', type: 'Практика', teacher: '', room: '', link: '' },
+    { day: 'Четвер', time: '14:40–16:00', subject: 'Національний спротив', type: 'Практика', teacher: '', room: '', link: '' },
+
+    { day: 'П\'ятниця', time: '13:10–14:30', subject: 'Тренінг з майстерності', type: 'Практика', teacher: '', room: '', link: '' },
+    { day: 'П\'ятниця', time: '14:40–16:00', subject: 'Тренінг з майстерності', type: 'Практика', teacher: '', room: '', link: '' },
+    { day: 'П\'ятниця', time: '16:10–17:30', subject: 'Сценічна мова', type: 'Практика', teacher: '', room: '', link: '' }
+];
+
+const scheduleDB = {
+    upper: [...defaultScheduleDays],
+    lower: [...defaultScheduleDays]
+};
+
+const allSubjectsList = [
+    'Танець',
+    'Майстерність',
+    'Теорія драми',
+    'Вокал',
+    'Історія зарубіжного театру',
+    'Ритмопластика',
+    'Національний спротив',
+    'Тренінг з майстерності',
+    'Сценічна мова'
+];
+
+// Ізольований локальний кеш саме для НАКККіМ
+let state = {
+    weekType: localStorage.getItem('nakkkim_weekType') || 'upper',
+    tasks: JSON.parse(localStorage.getItem('nakkkim_tasks')) || [],
+    completedTaskIds: JSON.parse(localStorage.getItem('nakkkim_completedIds')) || [],
+    subjectData: JSON.parse(localStorage.getItem('nakkkim_subjectData')) || {},
+    settings: JSON.parse(localStorage.getItem('nakkkim_settings')) || { name: 'Студент', darkTheme: false },
+    currentViewParams: null,
+    uploadTarget: null,
+    taskFilter: 'pending',
+    taskSearch: '',
+    taskSort: 'deadline',
+    calendarDate: new Date(),
+    currentDetailTaskId: null
+};
+
+allSubjectsList.forEach(sub => {
+    if(!state.subjectData[sub]) {
+        state.subjectData[sub] = { notes: [], literature: [], seminars: [], additional_info: { text: '', files: [] } };
+    }
+});
+
+// ==================== 3. СИНХРОНІЗАЦІЯ ДАНИХ (ADMIN vs USER) ====================
+function updateAdminUI() {
+    const adminMode = isAdmin();
+
+    const btnAddTask = document.getElementById('btnAddTask');
+    if (btnAddTask) btnAddTask.style.display = adminMode ? 'inline-flex' : 'none';
+
+    const uploadButtons = document.querySelectorAll('.panel-card button, #subject-details button:not(#btnBackToSubjects), #seminar-details button:not(#btnBackToSeminars)');
+    uploadButtons.forEach(btn => {
+        if (btn.innerText.includes('Зберегти')) {
+            btn.style.display = adminMode ? 'inline-block' : 'none';
+        }
+        if (btn.querySelector('.fa-plus') || btn.querySelector('.fa-file-upload') || btn.querySelector('.fa-link') || btn.querySelector('.fa-google-drive')) {
+            btn.style.display = adminMode ? 'inline-flex' : 'none';
+        }
+    });
+
+    const editBtn = document.getElementById('detailBtnEdit');
+    const deleteBtn = document.getElementById('detailBtnDelete');
+    const addFileBtn = document.getElementById('btnAddTaskFile') || document.getElementById('btnAddDetailTaskFile');
+    const addDriveBtn = document.getElementById('btnAddTaskDriveLink');
+    if (editBtn) editBtn.style.display = adminMode ? 'inline-block' : 'none';
+    if (deleteBtn) deleteBtn.style.display = adminMode ? 'inline-block' : 'none';
+    if (addFileBtn) addFileBtn.style.display = adminMode ? 'inline-block' : 'none';
+    if (addDriveBtn) addDriveBtn.style.display = adminMode ? 'inline-flex' : 'none';
+
+    const additionalInfoArea = document.getElementById('additionalInfoText');
+    if (additionalInfoArea) additionalInfoArea.readOnly = !adminMode;
+}
+
+function saveData() {
+    localStorage.setItem('nakkkim_weekType', state.weekType);
+    localStorage.setItem('nakkkim_tasks', JSON.stringify(state.tasks));
+    localStorage.setItem('nakkkim_completedIds', JSON.stringify(state.completedTaskIds));
+    localStorage.setItem('nakkkim_subjectData', JSON.stringify(state.subjectData));
+    localStorage.setItem('nakkkim_settings', JSON.stringify(state.settings));
+
+    if (!db) return;
+
+    if (isAdmin()) {
+        const updatePayload = {
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        };
+
+        if (Array.isArray(state.tasks)) {
+            updatePayload.tasks = state.tasks;
+        }
+
+        if (state.subjectData && Object.keys(state.subjectData).length > 0) {
+            updatePayload.subjectData = state.subjectData;
+        }
+
+        db.collection('global_content').doc('main_data').set(updatePayload, { merge: true })
+            .catch(err => console.error("Помилка запису в Firestore:", err));
+    }
+
+    if (currentUser) {
+        db.collection('students').doc(currentUser.uid).set({
+            completedTaskIds: state.completedTaskIds,
+            settings: state.settings,
+            email: currentUser.email,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true }).catch(err => console.error("Помилка збереження даних студента:", err));
+    }
+}
+
+async function loadGlobalContent() {
+    if (!db) return;
+    try {
+        const docRef = db.collection('global_content').doc('main_data');
+        const doc = await docRef.get();
+        if (doc.exists) {
+            const data = doc.data();
+            if (data.tasks) {
+                state.tasks = data.tasks;
+                localStorage.setItem('nakkkim_tasks', JSON.stringify(state.tasks));
+            }
+            if (data.subjectData && Object.keys(data.subjectData).length > 0) {
+                state.subjectData = { ...state.subjectData, ...data.subjectData };
+                localStorage.setItem('nakkkim_subjectData', JSON.stringify(state.subjectData));
+            }
+        } else if (isAdmin()) {
+            saveData();
+        }
+        syncTasksCompletion();
+        renderTasks();
+        renderCalendar();
+        renderSubjectsGrid();
+        renderSeminarsGrid();
+    } catch (e) {
+        console.error("Помилка завантаження глобальних даних:", e);
+    }
+}
+
+async function loadUserData() {
+    if (!currentUser || !db) return;
+    try {
+        const docRef = db.collection('students').doc(currentUser.uid);
+        const doc = await docRef.get();
+        if (doc.exists) {
+            const data = doc.data();
+            if (data.completedTaskIds) {
+                state.completedTaskIds = data.completedTaskIds;
+                localStorage.setItem('nakkkim_completedIds', JSON.stringify(state.completedTaskIds));
+            }
+            if (data.settings) {
+                state.settings = { ...state.settings, ...data.settings };
+                initSettings();
+            }
+        }
+        syncTasksCompletion();
+        renderTasks();
+        renderCalendar();
+    } catch (e) {
+        console.error("Помилка завантаження студента:", e);
+    }
+}
+
+function syncTasksCompletion() {
+    state.tasks.forEach(t => {
+        t.completed = state.completedTaskIds.includes(t.id);
+    });
+}
+
+// ==================== 4. АВТОРИЗАЦІЯ FIREBASE ====================
+auth.onAuthStateChanged(user => {
+    currentUser = user;
+    const userDisplay = document.getElementById('userDisplay');
+    const btnAuthAction = document.getElementById('btnAuthAction');
+
+    if (user) {
+        const isAdm = isAdmin();
+        if (userDisplay) {
+            userDisplay.innerHTML = isAdm
+                ? `<strong>👑 Адміністратор</strong><br><small>${user.email}</small>`
+                : `<strong>Студент</strong><br><small>${user.email}</small>`;
+        }
+        if (btnAuthAction) btnAuthAction.innerHTML = '<i class="fas fa-sign-out-alt"></i> Вийти';
+        loadUserData();
+    } else {
+        if (userDisplay) userDisplay.innerText = 'Гість (лише перегляд)';
+        if (btnAuthAction) btnAuthAction.innerHTML = '<i class="fas fa-sign-in-alt"></i> Увійти';
+    }
+
+    updateAdminUI();
+    renderTasks();
+});
+
+function setupAuthEventListeners() {
+    const btnAuthAction = document.getElementById('btnAuthAction');
+    const authModal = document.getElementById('authModal');
+    const closeAuthModal = document.getElementById('closeAuthModal');
+    const btnToggleAuthMode = document.getElementById('btnToggleAuthMode');
+    const authForm = document.getElementById('authForm');
+
+    if (btnAuthAction) {
+        btnAuthAction.addEventListener('click', () => {
+            if (currentUser) {
+                auth.signOut();
+            } else if (authModal) {
+                authModal.style.display = 'flex';
+            }
+        });
+    }
+
+    if (closeAuthModal && authModal) {
+        closeAuthModal.addEventListener('click', () => authModal.style.display = 'none');
+    }
+
+    if (btnToggleAuthMode) {
+        btnToggleAuthMode.addEventListener('click', () => {
+            isSignUpMode = !isSignUpMode;
+            document.getElementById('authModalTitle').innerText = isSignUpMode ? 'Реєстрація' : 'Вхід до кабінету';
+            document.getElementById('btnAuthSubmit').innerText = isSignUpMode ? 'Зареєструватися' : 'Увійти';
+            btnToggleAuthMode.innerText = isSignUpMode ? 'Вже маєте акаунт? Увійти' : 'Немає акаунта? Зареєструватися';
+            const authError = document.getElementById('authError');
+            if (authError) authError.style.display = 'none';
+        });
+    }
+
+    if (authForm) {
+        authForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('authEmail').value;
+            const pass = document.getElementById('authPassword').value;
+            const errorEl = document.getElementById('authError');
+            if (errorEl) errorEl.style.display = 'none';
+
+            try {
+                if (isSignUpMode) {
+                    await auth.createUserWithEmailAndPassword(email, pass);
+                } else {
+                    await auth.signInWithEmailAndPassword(email, pass);
+                }
+                if (authModal) authModal.style.display = 'none';
+                authForm.reset();
+            } catch (err) {
+                if (errorEl) {
+                    errorEl.innerText = err.message;
+                    errorEl.style.display = 'block';
+                }
+            }
+        });
+    }
+}
+
+// ==================== 5. INDEXED DB (ЗБЕРЕЖЕННЯ ФАЙЛІВ) ====================
+const dbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open('UniAppFilesDB_NAKKKIM', 1);
+    request.onupgradeneeded = e => e.target.result.createObjectStore('files', { keyPath: 'id' });
+    request.onsuccess = e => resolve(e.target.result);
+    request.onerror = e => reject('Помилка IndexedDB');
+});
+async function saveFileToDB(fileObj) { const dbInst = await dbPromise; dbInst.transaction('files', 'readwrite').objectStore('files').put(fileObj); }
+async function getFileFromDB(id) { const dbInst = await dbPromise; return new Promise(res => { const req = dbInst.transaction('files', 'readonly').objectStore('files').get(id); req.onsuccess = () => res(req.result); }); }
+async function deleteFileFromDB(id) { const dbInst = await dbPromise; dbInst.transaction('files', 'readwrite').objectStore('files').delete(id); }
+
+// ==================== 6. ІНІЦІАЛІЗАЦІЯ ====================
+document.addEventListener('DOMContentLoaded', () => {
+    injectMobileUXStyles();
+    initSettings();
+    updateDateAndTime();
+    renderSchedule();
+    renderTasks();
+    renderSubjectsGrid();
+    renderSeminarsGrid();
+    renderCalendar();
+    setupNavigation();
+    setupEventListeners();
+    setupAuthEventListeners();
+    setupMobileGestures();
+    loadGlobalContent();
+
+    setInterval(updateDateAndTime, 60000);
+});
+
+// ==================== 7. НАВІГАЦІЯ ====================
+function setupNavigation() {
+    const navItems = document.querySelectorAll('.nav-item');
+    const sections = document.querySelectorAll('.page-section');
+    navItems.forEach(item => {
+        item.addEventListener('click', (e) => {
+            e.preventDefault();
+            navItems.forEach(nav => nav.classList.remove('active'));
+            sections.forEach(sec => sec.classList.remove('active'));
+            item.classList.add('active');
+            const target = item.getAttribute('data-target');
+            const targetEl = document.getElementById(target);
+            if(targetEl) targetEl.classList.add('active');
+
+            if(window.innerWidth <= 768) {
+                toggleSidebarMobile(false);
+            }
+            if(target === 'schedule') {
+                updateDateAndTime();
+                renderSchedule();
+            }
+            if(target === 'tasks') renderTasks();
+            if(target === 'calendar') renderCalendar();
+            if(target === 'seminars-tab') renderSeminarsGrid();
+            updateAdminUI();
+            triggerHaptic(10);
+        });
+    });
+    const mobBtn = document.getElementById('mobileMenuBtn');
+    if(mobBtn) mobBtn.addEventListener('click', () => toggleSidebarMobile(true));
+    const closeSbBtn = document.getElementById('closeSidebar');
+    if(closeSbBtn) closeSbBtn.addEventListener('click', () => toggleSidebarMobile(false));
+}
+
+// ==================== 8. ТИПИ ТА БЕЙДЖІ ЗАВДАНЬ ====================
+function getTaskTypeClass(type) {
+    if (type === 'Тест') return 'type-test';
+    if (type === 'Семінар') return 'type-seminar';
+    if (type === 'Перевірка') return 'type-check';
+    return 'type-task';
+}
+
+function getTaskTypeBadgeName(type) {
+    if (type === 'Тест') return 'badge-type-test';
+    if (type === 'Семінар') return 'badge-type-seminar';
+    if (type === 'Перевірка') return 'badge-type-check';
+    return 'badge-type-task';
+}
+
+const UK_MONTHS_SHORT = ['січ', 'лют', 'бер', 'квіт', 'трав', 'черв', 'лип', 'серп', 'вер', 'жовт', 'лист', 'груд'];
+
+function parseDateStr(dateStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, m - 1, d);
+}
+
+function getDaysUntil(dateStr) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.round((parseDateStr(dateStr) - today) / 86400000);
+}
+
+function formatDeadline(dateStr) {
+    const diff = getDaysUntil(dateStr);
+    if (diff === 0) return 'сьогодні';
+    if (diff === 1) return 'завтра';
+    if (diff >= 2 && diff <= 6) return `через ${diff} ${diff >= 5 ? 'днів' : 'дні'}`;
+    const d = parseDateStr(dateStr);
+    return `${d.getDate()} ${UK_MONTHS_SHORT[d.getMonth()]}`;
+}
+
+function getDeadlineBadge(t) {
+    if (t.completed) return { cls: 'btn-join', text: 'Виконано' };
+    const diff = getDaysUntil(t.deadline);
+    if (diff < 0) return { cls: 'badge-danger', text: 'Прострочено' };
+    if (diff <= 2) return { cls: 'badge-soon', text: formatDeadline(t.deadline) };
+    return { cls: 'badge-neutral', text: formatDeadline(t.deadline) };
+}
+
+function buildTaskCard(t) {
+    const isOverdue = !t.completed && getDaysUntil(t.deadline) < 0;
+    const typeClass = getTaskTypeClass(t.type || 'Завдання');
+    const typeBadgeClass = getTaskTypeBadgeName(t.type || 'Завдання');
+    const dl = getDeadlineBadge(t);
+    const fileCount = t.materials ? t.materials.length : 0;
+
+    return `
+        <div id="task-card-${t.id}" class="task-card ${t.completed ? 'completed' : ''} ${isOverdue ? 'overdue' : ''} ${typeClass}" onclick="openTaskDetailsModal(${t.id})">
+            <div class="task-card-top">
+                <div class="task-header">
+                    <span class="task-subject" title="${t.subject}">
+                        <span class="task-subject-name">${t.subject}</span>
+                        <span class="type-badge ${typeBadgeClass}">${t.type || 'Завдання'}</span>
+                    </span>
+                    <span class="badge ${dl.cls}">${dl.text}</span>
+                </div>
+                <h4 class="task-card-title" title="${t.title}">${t.title}</h4>
+                <div class="task-desc-preview">${t.desc || 'Без опису'}</div>
+            </div>
+            <div class="task-card-bottom">
+                <div class="task-meta-row">
+                    <span class="task-files-pill">${fileCount > 0 ? `<i class="fas fa-paperclip"></i> Файлів: ${fileCount}` : ''}</span>
+                    <button class="btn-details" onclick="event.stopPropagation(); openTaskDetailsModal(${t.id})">Детальніше ↗</button>
+                </div>
+                <div class="task-card-footer" onclick="event.stopPropagation()">
+                    <button class="btn ${t.completed ? 'btn-outline' : 'btn-primary'} btn-sm" onclick="toggleTaskStatus(${t.id})">${t.completed ? 'Відновити' : '✓ Виконати'}</button>
+                    ${isAdmin() ? `
+                    <div class="flex-end gap-10">
+                        <button class="icon-btn" onclick="event.stopPropagation(); openEditTaskModal(${t.id})" title="Редагувати"><i class="fas fa-pen"></i></button>
+                        <button class="icon-btn delete" onclick="event.stopPropagation(); confirmDelete(() => processDeleteTask(${t.id}))" title="Видалити"><i class="fas fa-trash"></i></button>
+                    </div>` : ''}
+                </div>
+            </div>
+        </div>`;
+}
+
+// ==================== 9. РОЗКЛАД ТА ІНДИКАТОРИ ====================
+function getTaskAlertIndicator(subjectName) {
+    const cleanSubj = subjectName.split('(')[0].trim();
+    const hasPending = state.tasks.some(t => t.subject === cleanSubj && !t.completed);
+    return hasPending ? `<i class="fas fa-fire task-alert-icon" title="Є невиконані завдання!"></i>` : '';
+}
+
+function renderSchedule() {
+    const container = document.getElementById('scheduleContainer');
+    if(!container) return;
+    container.innerHTML = '';
+    const days = ['Понеділок', 'Вівторок', 'Середа', 'Четвер', 'П\'ятниця'];
+    const shortDays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт'];
+
+    const now = new Date();
+    let currentDayIndex = now.getDay() - 1;
+
+    if (currentDayIndex < 0 || currentDayIndex > 4) {
+        currentDayIndex = 0;
+    }
+
+    const nextInfo = getNextClassInfo();
+
+    days.forEach((day, index) => {
+        const classes = scheduleDB[state.weekType].filter(c => c.day === day);
+        if (classes.length === 0) return;
+
+        const dayCard = document.createElement('div');
+        dayCard.className = `day-card ${index === currentDayIndex ? 'current-day' : ''}`;
+        dayCard.id = `day-card-${index}`;
+        dayCard.dataset.dayIndex = index;
+
+        let html = `<h3 class="day-title">${day} ${index === currentDayIndex ? '<span style="font-size: 11px; float: right; padding: 2px 8px; background: rgba(67, 97, 238, 0.15); border-radius: 6px;">СЬОГОДНІ</span>' : ''}</h3><div>`;
+        classes.forEach(c => {
+            const badge = c.type.toLowerCase().includes('семінар') || c.type.toLowerCase().includes('практика') ? 'badge-seminar' : '';
+            const taskAlert = getTaskAlertIndicator(c.subject);
+
+            let liveIndicator = '';
+            if (nextInfo.status === 'ongoing' && nextInfo.class.subject === c.subject && nextInfo.class.time === c.time) {
+                liveIndicator = `<span style="color: #06d6a0; font-size: 10px; font-weight: 700; background: rgba(6, 214, 160, 0.15); padding: 3px 8px; border-radius: 12px; margin-left: 10px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid rgba(6, 214, 160, 0.3);"><span style="display:inline-block; width:6px; height:6px; background:#06d6a0; border-radius:50%; animation: pulse 2s infinite;"></span>ТРИВАЄ ЗАРАЗ</span>`;
+            }
+
+            html += `
+                <div class="class-item">
+                    <div class="class-time">${c.time}</div>
+                    <div class="class-info">
+                        <div class="class-subject">${c.subject} ${taskAlert} ${liveIndicator}</div>
+                        <div class="class-details">
+                            <span class="badge-type ${badge}">${c.type.toUpperCase()}</span>
+                            ${c.teacher ? `<span><i class="fas fa-user-tie"></i> ${c.teacher}</span>` : ''}
+                            ${c.room ? `<span><i class="fas fa-door-open"></i> ауд. ${c.room}</span>` : ''}
+                        </div>
+                    </div>
+                    ${c.link ? `<div class="class-actions"><a href="${c.link}" target="_blank" class="btn btn-join"><i class="fas fa-video"></i> Приєднатися</a></div>` : ''}
+                </div>`;
+        });
+        dayCard.innerHTML = html + `</div>`;
+        container.appendChild(dayCard);
+    });
+
+    renderMobileDayPills(container, shortDays, currentDayIndex);
+
+    if (window.innerWidth <= 768) {
+        setTimeout(() => {
+            scrollToScheduleDay(currentDayIndex, false);
+        }, 120);
+    }
+}
+
+function parseClassTime(timeStr, baseDate = new Date()) {
+    const parts = timeStr.split(/[-–]/);
+    if(parts.length !== 2) return null;
+    const [sh, sm] = parts[0].split(':').map(Number);
+    const [eh, em] = parts[1].split(':').map(Number);
+    const start = new Date(baseDate); start.setHours(sh, sm, 0, 0);
+    const end = new Date(baseDate); end.setHours(eh, em, 0, 0);
+    return { start, end };
+}
+
+function getNextClassInfo() {
+    const now = new Date();
+    const daysUk = ['Неділя', 'Понеділок', 'Вівторок', 'Середа', 'Четвер', 'П\'ятниця', 'Субота'];
+    for (let offset = 0; offset < 14; offset++) {
+        const targetDate = new Date(now); targetDate.setDate(now.getDate() + offset);
+        const dayName = daysUk[targetDate.getDay()];
+        let targetWeekType = state.weekType; let tempDate = new Date(now); let mondaysPassed = 0;
+        for(let i = 1; i <= offset; i++){ tempDate.setDate(tempDate.getDate() + 1); if(tempDate.getDay() === 1) mondaysPassed++; }
+        if (mondaysPassed % 2 !== 0) targetWeekType = targetWeekType === 'upper' ? 'lower' : 'upper';
+        const classes = scheduleDB[targetWeekType].filter(c => c.day === dayName);
+        for (let i = 0; i < classes.length; i++) {
+            const c = classes[i]; const times = parseClassTime(c.time, targetDate); if(!times) continue;
+            if (offset === 0) {
+                if (now >= times.start && now <= times.end) return { status: 'ongoing', class: c, end: times.end };
+                if (now < times.start) return { status: 'next', class: c, start: times.start, isToday: true };
+            } else return { status: 'next_day', class: c, start: times.start, dayName: dayName, isToday: false };
+        }
+    } return { status: 'none' };
+}
+
+function getTimeRemainingStr(targetDate) {
+    const diffMs = targetDate - new Date(); if (diffMs <= 0) return '';
+    const diffMins = Math.floor(diffMs / 60000);
+    const hours = Math.floor(diffMins / 60); const mins = diffMins % 60;
+    return hours > 0 ? `через ${hours} год ${mins} хв` : `через ${mins} хв`;
+}
+
+function updateDateAndTime() {
+    const now = new Date();
+    const dateEl = document.getElementById('currentDate');
+    if (dateEl) dateEl.textContent = now.toLocaleDateString('uk-UA', { weekday: 'long', month: 'long', day: 'numeric' });
+
+    const weekBadge = document.getElementById('currentWeekTypeBadge');
+    if (weekBadge) weekBadge.textContent = state.weekType === 'upper' ? 'ТИЖДЕНЬ 1' : 'ТИЖДЕНЬ 2';
+
+    const nextInfo = getNextClassInfo();
+    const daysUk = ['Неділя', 'Понеділок', 'Вівторок', 'Середа', 'Четвер', 'П\'ятниця', 'Субота'];
+    const todayClasses = scheduleDB[state.weekType].filter(c => c.day === daysUk[now.getDay()]);
+    const nextWidget = document.getElementById('nextClassWidget');
+
+    if (nextWidget) {
+        if (nextInfo.status === 'ongoing') {
+            const c = nextInfo.class;
+            const badge = c.type.toLowerCase().includes('семінар') || c.type.toLowerCase().includes('практика') ? 'badge-seminar' : '';
+            nextWidget.innerHTML = `<div style="margin-bottom: 12px; color: #06d6a0; font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px; border-bottom: 1px dashed var(--border-color); padding-bottom: 8px;"><span style="display:inline-block; width:8px; height:8px; background:#06d6a0; border-radius:50%; animation: pulse 2s infinite;"></span> ТРИВАЄ ЗАРАЗ (до ${nextInfo.end.toLocaleTimeString('uk-UA', {hour:'2-digit', minute:'2-digit'})})</div><div class="class-item p-0" style="border: none;"><div class="class-time">${c.time}</div><div class="class-info"><div class="class-subject">${c.subject}</div><div class="class-details" style="margin-top: 8px;"><span class="badge-type ${badge}">${c.type.toUpperCase()}</span>${c.teacher ? `<span><i class="fas fa-user-tie"></i> ${c.teacher}</span>` : ''}</div></div>${c.link ? `<div class="class-actions"><a href="${c.link}" target="_blank" class="btn btn-join btn-sm"><i class="fas fa-video"></i></a></div>` : ''}</div>`;
+        } else if (nextInfo.status === 'next' || nextInfo.status === 'next_day') {
+            const c = nextInfo.class;
+            const badge = c.type.toLowerCase().includes('семінар') || c.type.toLowerCase().includes('практика') ? 'badge-seminar' : '';
+            const timeStr = nextInfo.isToday ? getTimeRemainingStr(nextInfo.start) : `у ${nextInfo.dayName.toLowerCase()}`;
+            const preText = nextInfo.isToday ? 'НАСТУПНЕ ЗАНЯТТЯ' : (todayClasses.length === 0 ? 'СЬОГОДНІ ЗАНЯТЬ НЕМАЄ' : 'ЗАНЯТТЯ ЗАКІНЧИЛИСЬ');
+            nextWidget.innerHTML = `<div style="margin-bottom: 12px; color: var(--primary-color); font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px dashed var(--border-color); padding-bottom: 8px;"><span>${preText}</span>${timeStr ? `<span style="font-weight: 600; font-size: 12px; color: var(--text-muted); background: var(--bg-color); padding: 3px 8px; border-radius: 6px;"><i class="fas fa-clock"></i> ${timeStr}</span>` : ''}</div><div class="class-item p-0" style="border: none;"><div class="class-time">${c.time}</div><div class="class-info"><div class="class-subject">${c.subject}</div><div class="class-details" style="margin-top: 8px;"><span class="badge-type ${badge}">${c.type.toUpperCase()}</span>${c.teacher ? `<span><i class="fas fa-user-tie"></i> ${c.teacher}</span>` : ''}</div></div></div>`;
+        } else {
+            nextWidget.innerHTML = '<p class="text-muted">Занять більше не знайдено в розкладі.</p>';
+        }
+    }
+}
+
+// ==================== 10. КАЛЕНДАР ====================
+function isMobileView() {
+    return window.innerWidth <= 768;
+}
+
+function renderCalendar() {
+    const grid = document.getElementById('calendarGrid');
+    if(!grid) return;
+    grid.innerHTML = '';
+    const year = state.calendarDate.getFullYear(); const month = state.calendarDate.getMonth();
+    const monthNames = ['Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень', 'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'];
+    const calMY = document.getElementById('calendarMonthYear');
+    if(calMY) calMY.textContent = `${monthNames[month]} ${year}`;
+
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    let startDay = firstDay === 0 ? 6 : firstDay - 1;
+
+    for (let i = 0; i < startDay; i++) grid.innerHTML += `<div class="cal-day empty"></div>`;
+    const today = new Date(); today.setHours(0,0,0,0);
+    const mobile = isMobileView();
+
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const isToday = today.getTime() === new Date(year, month, day).getTime();
+        const dayTasks = state.tasks.filter(t => t.deadline === dateStr);
+
+        let tasksHtml = '';
+        if (mobile) {
+            if (dayTasks.length > 0) {
+                const hasOpen = dayTasks.some(t => !t.completed);
+                const hasOverdue = dayTasks.some(t => !t.completed && getDaysUntil(t.deadline) < 0);
+                const dotCls = hasOverdue ? 'over' : (hasOpen ? '' : 'done');
+                tasksHtml = `<div class="cal-dots"><span class="cal-dot ${dotCls}"></span>${dayTasks.length > 1 ? `<span class="cal-count">${dayTasks.length}</span>` : ''}</div>`;
+            }
+        } else {
+            dayTasks.forEach(t => {
+                const typeClass = getTaskTypeClass(t.type || 'Завдання');
+                const doneClass = t.completed ? 'done' : '';
+                const overdueClass = !t.completed && getDaysUntil(t.deadline) < 0 ? 'over' : '';
+                const mark = t.completed ? '✓ ' : '';
+                tasksHtml += `<div class="cal-task-label ${typeClass} ${doneClass} ${overdueClass}" title="${t.title}">${mark}${t.title}</div>`;
+            });
+        }
+
+        const dayCell = document.createElement('div');
+        dayCell.className = `cal-day ${isToday ? 'today' : ''}`;
+        dayCell.innerHTML = `<div class="cal-date">${day}</div>${tasksHtml}`;
+        dayCell.onclick = () => openDayDetailsView(dateStr);
+        grid.appendChild(dayCell);
+    }
+}
+
+function changeCalendarMonth(delta) {
+    const grid = document.getElementById('calendarGrid');
+    if (grid) {
+        grid.style.transition = 'transform 0.18s ease, opacity 0.18s ease';
+        grid.style.transform = `translateX(${delta > 0 ? '-25px' : '25px'})`;
+        grid.style.opacity = '0.3';
+    }
+    setTimeout(() => {
+        state.calendarDate.setMonth(state.calendarDate.getMonth() + delta);
+        renderCalendar();
+        if (grid) {
+            grid.style.transition = 'none';
+            grid.style.transform = `translateX(${delta > 0 ? '25px' : '-25px'})`;
+            requestAnimationFrame(() => {
+                grid.style.transition = 'transform 0.2s ease, opacity 0.2s ease';
+                grid.style.transform = 'translateX(0)';
+                grid.style.opacity = '1';
+            });
+        }
+    }, 150);
+    triggerHaptic(12);
+}
+
+const btnPrevMonth = document.getElementById('btnPrevMonth');
+if(btnPrevMonth) btnPrevMonth.onclick = () => changeCalendarMonth(-1);
+const btnNextMonth = document.getElementById('btnNextMonth');
+if(btnNextMonth) btnNextMonth.onclick = () => changeCalendarMonth(1);
+
+let lastIsMobile = isMobileView();
+window.addEventListener('resize', () => {
+    const nowMobile = isMobileView();
+    if (nowMobile !== lastIsMobile) {
+        lastIsMobile = nowMobile;
+        renderCalendar();
+        renderSchedule();
+    }
+});
+
+function openDayDetailsView(dateStr) {
+    document.querySelectorAll('.page-section').forEach(s => s.classList.remove('active'));
+    const daySection = document.getElementById('day-details');
+    if(daySection) daySection.classList.add('active');
+
+    const dayTitle = document.getElementById('dayDetailTitle');
+    if(dayTitle) dayTitle.textContent = parseDateStr(dateStr).toLocaleDateString('uk-UA', { day: 'numeric', month: 'long', year: 'numeric' });
+
+    const container = document.getElementById('dayTasksGrid');
+    if (!container) return;
+    const dayTasks = state.tasks.filter(t => t.deadline === dateStr);
+
+    container.innerHTML = dayTasks.length
+        ? dayTasks.map(buildTaskCard).join('')
+        : '<p class="text-muted" style="grid-column: 1/-1;">На цей день завдань немає.</p>';
+}
+
+const btnBackToCalendar = document.getElementById('btnBackToCalendar');
+if(btnBackToCalendar) {
+    btnBackToCalendar.onclick = () => {
+        document.getElementById('day-details').classList.remove('active');
+        document.getElementById('calendar').classList.add('active');
+        renderCalendar();
+    };
+}
+
+// ==================== 11. ПРЕДМЕТИ ТА СЕМІНАРИ ====================
+function renderSubjectsGrid() {
+    const grid = document.getElementById('subjectsGrid');
+    if(!grid) return;
+    grid.innerHTML = '';
+    allSubjectsList.forEach(sub => {
+        const data = state.subjectData[sub];
+        const card = document.createElement('div'); card.className = 'card subject-card';
+        card.innerHTML = `<h3>${sub}</h3><div class="subject-meta"><span>📝 Конспекти: ${data.notes.length}</span><span>📚 Література: ${data.literature.length}</span></div>`;
+        card.onclick = () => openDetailsView('subject', sub); grid.appendChild(card);
+    });
+    const taskSubSelect = document.getElementById('taskSubject');
+    if(taskSubSelect) taskSubSelect.innerHTML = allSubjectsList.map(s => `<option value="${s}">${s}</option>`).join('');
+}
+
+function renderSeminarsGrid() {
+    const grid = document.getElementById('seminarsGrid');
+    if(!grid) return;
+    grid.innerHTML = '';
+    allSubjectsList.forEach(sub => {
+        const card = document.createElement('div'); card.className = 'card subject-card';
+        const tasksCount = state.tasks.filter(t => t.subject === sub && t.type === 'Семінар').length;
+        card.innerHTML = `<h3>${sub}</h3><div class="subject-meta"><span>📝 Завдань: ${tasksCount}</span><span>📁 Матеріалів: ${state.subjectData[sub].seminars.length}</span></div>`;
+        card.onclick = () => openDetailsView('seminar', sub); grid.appendChild(card);
+    });
+}
+
+function openDetailsView(type, subjectName) {
+    state.currentViewParams = { type, name: subjectName };
+    document.querySelectorAll('.page-section').forEach(s => s.classList.remove('active'));
+    if (type === 'subject') {
+        document.getElementById('subject-details').classList.add('active');
+        document.getElementById('subjectDetailTitle').textContent = subjectName;
+        document.getElementById('additionalInfoText').value = state.subjectData[subjectName].additional_info.text;
+        renderFileList('subjectNotesList', state.subjectData[subjectName].notes, {type: 'notes'});
+        renderFileList('subjectLiteratureList', state.subjectData[subjectName].literature, {type: 'literature'});
+        renderFileList('subjectAdditionalFilesList', state.subjectData[subjectName].additional_info.files, {type: 'additional'});
+    } else {
+        document.getElementById('seminar-details').classList.add('active');
+        document.getElementById('seminarDetailTitle').textContent = subjectName;
+        renderSeminarTasks(subjectName);
+        renderFileList('seminarFilesList', state.subjectData[subjectName].seminars, {type: 'seminars'});
+    }
+    updateAdminUI();
+}
+
+const btnBackToSubjects = document.getElementById('btnBackToSubjects');
+if(btnBackToSubjects) btnBackToSubjects.onclick = () => { document.getElementById('subject-details').classList.remove('active'); document.getElementById('subjects').classList.add('active'); renderSubjectsGrid(); };
+const btnBackToSeminars = document.getElementById('btnBackToSeminars');
+if(btnBackToSeminars) btnBackToSeminars.onclick = () => { document.getElementById('seminar-details').classList.remove('active'); document.getElementById('seminars-tab').classList.add('active'); renderSeminarsGrid(); };
+
+function saveAdditionalInfo() {
+    if (!isAdmin()) { alert("Лише адміністратор може редагувати матеріали."); return; }
+    if(!state.currentViewParams) return;
+    state.subjectData[state.currentViewParams.name].additional_info.text = document.getElementById('additionalInfoText').value;
+    saveData(); showMobileToast("Текст збережено ✓");
+}
+
+function renderSeminarTasks(subjectName) {
+    const container = document.getElementById('seminarTasksList');
+    if(!container) return;
+    const seminarTasks = state.tasks.filter(t => t.subject === subjectName && t.type === 'Семінар');
+    const sc = document.getElementById('seminarTasksContainer');
+
+    if (seminarTasks.length === 0) {
+        if(sc) sc.style.display = 'none';
+        return;
+    }
+    if(sc) sc.style.display = 'block';
+    container.innerHTML = seminarTasks.map(buildTaskCard).join('');
+}
+
+// ==================== 12. РОБОТА З ФАЙЛАМИ ТА ДОКУМЕНТАМИ ====================
+function getFileIcon(filename, type) {
+    if (type === 'gdrive' || (filename && filename.includes('drive.google.com'))) {
+        return '<i class="fab fa-google-drive" style="color: #0F9D58;"></i>';
+    }
+    if (type === 'link') return '<i class="fas fa-link" style="color: #4285F4;"></i>';
+    if (filename && filename.endsWith('.pdf')) return '<i class="fas fa-file-pdf" style="color: #e23636;"></i>';
+    if (filename && filename.match(/\.(jpg|jpeg|png)$/i)) return '<i class="fas fa-file-image" style="color: #00a8ff;"></i>';
+    return '<i class="fas fa-file-alt"></i>';
+}
+
+function renderFileList(containerId, filesArray, sourceObj) {
+    const container = document.getElementById(containerId);
+    if(!container) return;
+    if(!filesArray || filesArray.length === 0) { container.innerHTML = '<p class="text-muted">Поки порожньо</p>'; return; }
+    const adminMode = isAdmin();
+
+    container.innerHTML = filesArray.map(f => `
+        <div class="file-row">
+            <div class="file-name-col" onclick="viewFile('${f.id}', '${f.type}', '${f.name}', '${f.url || ''}')" title="Відкрити">
+                ${getFileIcon(f.name, f.type)} <span class="file-name-text">${f.name}</span>
+            </div>
+            <div class="file-actions">
+                <button class="icon-btn" onclick="viewFile('${f.id}', '${f.type}', '${f.name}', '${f.url || ''}')" title="Відкрити"><i class="fas fa-eye"></i></button>
+                ${adminMode ? `
+                <button class="icon-btn" onclick="renameFile('${f.id}', '${sourceObj.type}', '${sourceObj.taskId || ''}')" title="Перейменувати"><i class="fas fa-pen"></i></button>
+                <button class="icon-btn delete" onclick="confirmDelete(() => processDeleteFile('${f.id}', '${sourceObj.type}', '${sourceObj.taskId || ''}'))" title="Видалити"><i class="fas fa-trash"></i></button>
+                ` : ''}
+            </div>
+        </div>
+    `).join('');
+}
+
+const globalInput = document.getElementById('globalFileInput');
+function triggerFileUpload(type, taskId = null) {
+    if (!isAdmin()) { alert("Лише адміністратор може додавати матеріали."); return; }
+    state.uploadTarget = { type, id: taskId };
+    if(globalInput) globalInput.click();
+}
+
+function triggerSubjectLink() {
+    if (!isAdmin()) { alert("Лише адміністратор може додавати посилання."); return; }
+    const url = prompt("Вставте посилання:"); if(!url) return;
+    const name = prompt("Назва посилання:", "Корисний ресурс");
+    state.subjectData[state.currentViewParams.name].literature.push({ id: 'lnk_'+Date.now(), name: name||"Посилання", type: 'link', url: url });
+    saveData(); openDetailsView('subject', state.currentViewParams.name);
+}
+
+function triggerGoogleDriveLink(type) {
+    if (!isAdmin()) { alert("Лише адміністратор може додавати матеріали."); return; }
+    if (!state.currentViewParams) return;
+
+    const url = prompt("Вставте посилання з Google Диска:");
+    if (!url || !url.trim()) return;
+    let cleanUrl = url.trim();
+    if (!/^https?:\/\//i.test(cleanUrl)) { alert("Посилання має починатися з https://"); return; }
+    
+    if (cleanUrl.includes('drive.google.com/file/d/')) {
+        cleanUrl = cleanUrl.replace(/\/view(\?.*)?$/, '/preview');
+    }
+
+    const name = prompt("Назва файлу:", "Файл з Google Диска") || "Файл з Google Диска";
+    const item = { id: 'gdrive_' + Date.now(), name: name, type: 'gdrive', url: cleanUrl };
+
+    const sub = state.currentViewParams.name;
+    if (type === 'notes') state.subjectData[sub].notes.push(item);
+    else if (type === 'literature') state.subjectData[sub].literature.push(item);
+    else if (type === 'additional') state.subjectData[sub].additional_info.files.push(item);
+    else if (type === 'seminars') state.subjectData[sub].seminars.push(item);
+
+    saveData();
+    openDetailsView(state.currentViewParams.type, sub);
+}
+
+function addTaskDriveLink(taskId) {
+    if (!isAdmin()) { alert("Лише адміністратор може додавати матеріали."); return; }
+    const t = state.tasks.find(x => x.id === taskId);
+    if (!t) return;
+
+    const url = prompt("Вставте посилання з Google Диска:");
+    if (!url || !url.trim()) return;
+    let cleanUrl = url.trim();
+    if (!/^https?:\/\//i.test(cleanUrl)) { alert("Посилання має починатися з https://"); return; }
+    
+    if (cleanUrl.includes('drive.google.com/file/d/')) {
+        cleanUrl = cleanUrl.replace(/\/view(\?.*)?$/, '/preview');
+    }
+
+    const name = prompt("Назва файлу:", "Файл з Google Диска") || "Файл з Google Диска";
+    if (!t.materials) t.materials = [];
+    t.materials.push({ id: 'gdrive_' + Date.now(), name: name, type: 'gdrive', url: cleanUrl });
+
+    saveData();
+    renderTasks();
+    openTaskDetailsModal(t.id);
+}
+
+if (globalInput) {
+    globalInput.addEventListener('change', function(e) {
+        if (!isAdmin()) return;
+        const file = e.target.files[0]; if(!file) return;
+        const reader = new FileReader();
+        reader.onload = async function(ev) {
+            const fileId = 'file_' + Date.now();
+            const metaObj = { id: fileId, name: file.name, type: file.type || 'unknown' };
+            await saveFileToDB({ id: fileId, data: ev.target.result });
+            if (state.uploadTarget.type === 'task') {
+                const t = state.tasks.find(x => x.id === state.uploadTarget.id);
+                if(t) {
+                    if(!t.materials) t.materials = [];
+                    t.materials.push(metaObj);
+                    renderTasks();
+                    if (state.currentDetailTaskId === t.id) openTaskDetailsModal(t.id);
+                    if (state.currentViewParams && state.currentViewParams.type === 'seminar') renderSeminarTasks(state.currentViewParams.name);
+                }
+            } else {
+                const sub = state.currentViewParams.name;
+                if(state.uploadTarget.type === 'notes') state.subjectData[sub].notes.push(metaObj);
+                else if (state.uploadTarget.type === 'literature') state.subjectData[sub].literature.push(metaObj);
+                else if (state.uploadTarget.type === 'additional') state.subjectData[sub].additional_info.files.push(metaObj);
+                else if (state.uploadTarget.type === 'seminars') state.subjectData[sub].seminars.push(metaObj);
+                openDetailsView(state.currentViewParams.type, sub);
+            } saveData();
+        }; reader.readAsDataURL(file); this.value = '';
+    });
+}
+
+async function processDeleteFile(id, sourceType, taskId) {
+    if (!isAdmin()) return;
+    if(sourceType === 'task') {
+        const t = state.tasks.find(x => x.id == taskId);
+        if (t && t.materials) t.materials = t.materials.filter(f => f.id !== id);
+    } else {
+        const sub = state.currentViewParams.name;
+        if(sourceType === 'notes') state.subjectData[sub].notes = state.subjectData[sub].notes.filter(f => f.id !== id);
+        if(sourceType === 'literature') state.subjectData[sub].literature = state.subjectData[sub].literature.filter(f => f.id !== id);
+        if(sourceType === 'additional') state.subjectData[sub].additional_info.files = state.subjectData[sub].additional_info.files.filter(f => f.id !== id);
+        if(sourceType === 'seminars') state.subjectData[sub].seminars = state.subjectData[sub].seminars.filter(f => f.id !== id);
+    }
+    
+    if(!id.startsWith('lnk_') && !id.startsWith('gdrive_')) {
+        await deleteFileFromDB(id);
+    }
+    
+    saveData();
+    if (sourceType === 'task') {
+        renderTasks();
+        if (state.currentDetailTaskId == taskId) openTaskDetailsModal(Number(taskId));
+        if (state.currentViewParams && state.currentViewParams.type === 'seminar') renderSeminarTasks(state.currentViewParams.name);
+    } else {
+        openDetailsView(state.currentViewParams.type, state.currentViewParams.name);
+    }
+}
+
+function renameFile(id, sourceType, taskId) {
+    if (!isAdmin()) return;
+    const newName = prompt("Введіть нову назву:"); if(!newName) return;
+    let arr = [];
+    if(sourceType === 'task') arr = state.tasks.find(x => x.id == taskId).materials;
+    else {
+        const sub = state.currentViewParams.name;
+        if(sourceType === 'notes') arr = state.subjectData[sub].notes;
+        if(sourceType === 'literature') arr = state.subjectData[sub].literature;
+        if(sourceType === 'additional') arr = state.subjectData[sub].additional_info.files;
+        if(sourceType === 'seminars') arr = state.subjectData[sub].seminars;
+    }
+    const file = arr.find(f => f.id === id);
+    if(file) {
+        file.name = newName;
+        saveData();
+        if (sourceType === 'task') {
+            renderTasks();
+            if (state.currentDetailTaskId == taskId) openTaskDetailsModal(Number(taskId));
+        } else {
+            openDetailsView(state.currentViewParams.type, state.currentViewParams.name);
+        }
+    }
+}
+
+async function viewFile(id, type, name, url) {
+    if (type === 'gdrive' || (url && url.includes('drive.google.com'))) {
+        document.getElementById('viewerTitle').textContent = name;
+        const body = document.getElementById('viewerBody');
+        document.getElementById('btnDownloadViewer').onclick = () => window.open(url, '_blank');
+        body.innerHTML = `<iframe src="${url}" style="width:100%; height:75vh; border:none; border-radius: 8px;" allow="autoplay"></iframe>`;
+        document.getElementById('viewerModal').style.display = 'flex';
+        return;
+    }
+    
+    if(type === 'link') { window.open(url, '_blank'); return; }
+    const dbFile = await getFileFromDB(id);
+    if(!dbFile) { alert("Файл не знайдено"); return; }
+
+    document.getElementById('viewerTitle').textContent = name;
+    const body = document.getElementById('viewerBody');
+    document.getElementById('btnDownloadViewer').onclick = () => downloadFileTrigger(id, name, type, url, dbFile.data);
+
+    if (type === 'application/pdf') {
+        body.innerHTML = `<iframe src="${dbFile.data}#toolbar=0" style="width:100%; height:75vh; border:none;"></iframe>`;
+    } else if (type.startsWith('image/')) {
+        body.innerHTML = `<img src="${dbFile.data}" style="max-width:100%; max-height:75vh; display:block; margin:auto; border-radius: 8px;">`;
+    } else if (type.startsWith('text/') || name.endsWith('.txt')) {
+        const text = atob(dbFile.data.split(',')[1]);
+        body.innerHTML = `<pre style="white-space: pre-wrap; font-family: inherit;">${decodeURIComponent(escape(text))}</pre>`;
+    } else {
+        body.innerHTML = `<div style="padding: 40px; text-align: center;"><i class="fas fa-file-alt" style="font-size: 60px; color: var(--primary-color); margin-bottom: 20px;"></i><h4>Цей формат неможливо переглянути в браузері.</h4><p class="text-muted mt-2">Будь ласка, завантажте файл на комп'ютер.</p></div>`;
+    }
+    document.getElementById('viewerModal').style.display = 'flex';
+}
+
+const closeViewerBtn = document.getElementById('closeViewerBtn');
+if(closeViewerBtn) {
+    closeViewerBtn.onclick = () => { document.getElementById('viewerModal').style.display = 'none'; document.getElementById('viewerBody').innerHTML = ''; };
+}
+
+async function downloadFileTrigger(id, name, type, url, preloadedData = null) {
+    if(type === 'link' || type === 'gdrive') { window.open(url, '_blank'); return; }
+    let fileData = preloadedData || (await getFileFromDB(id))?.data;
+    if(fileData) { const a = document.createElement('a'); a.href = fileData; a.download = name; a.click(); }
+}
+
+// ==================== 13. СИСТЕМА ЗАВДАНЬ ====================
+function renderTasks() {
+    const container = document.getElementById('tasksGrid');
+    if(!container) return;
+    let filtered = state.tasks;
+    if (state.taskSearch) {
+        const s = state.taskSearch.toLowerCase();
+        filtered = filtered.filter(t => t.title.toLowerCase().includes(s) || (t.desc && t.desc.toLowerCase().includes(s)) || t.subject.toLowerCase().includes(s));
+    }
+
+    if (state.taskFilter === 'pending') filtered = filtered.filter(t => !t.completed);
+    if (state.taskFilter === 'completed') filtered = filtered.filter(t => t.completed);
+    if (state.taskFilter === 'overdue') filtered = filtered.filter(t => !t.completed && getDaysUntil(t.deadline) < 0);
+
+    if (state.taskSort === 'deadline') filtered.sort((a, b) => parseDateStr(a.deadline) - parseDateStr(b.deadline));
+    else if (state.taskSort === 'subject') filtered.sort((a, b) => a.subject.localeCompare(b.subject));
+    else if (state.taskSort === 'date') filtered.sort((a, b) => b.id - a.id);
+
+    if (filtered.length === 0) {
+        container.innerHTML = `<div class="card" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">Завдань у цій категорії немає</div>`;
+    } else {
+        container.innerHTML = filtered.map(buildTaskCard).join('');
+    }
+
+    const count = state.tasks.filter(t => !t.completed).length;
+    const taskBadge = document.getElementById('taskBadge');
+    if(taskBadge) taskBadge.textContent = count;
+
+    renderSchedule(); updateDateAndTime(); renderCalendar();
+}
+
+function openTaskDetailsModal(id) {
+    const t = state.tasks.find(x => x.id === id);
+    if (!t) return;
+    state.currentDetailTaskId = id;
+
+    const isOverdue = !t.completed && getDaysUntil(t.deadline) < 0;
+    const typeBadgeClass = getTaskTypeBadgeName(t.type || 'Завдання');
+    const statusBadgeClass = t.completed ? 'btn-join' : (isOverdue ? 'badge-danger' : '');
+    const statusText = t.completed ? 'Виконано' : (isOverdue ? 'Прострочено' : 'Активне');
+
+    document.getElementById('detailTaskBadges').innerHTML = `
+        <span class="task-subject" style="max-width: unset;">${t.subject}</span>
+        <span class="type-badge ${typeBadgeClass}" style="margin-left: 0;">${t.type || 'Завдання'}</span>
+        <span class="badge ${statusBadgeClass}" style="margin-left: 0;">${statusText}</span>
+    `;
+
+    document.getElementById('detailTaskTitle').textContent = t.title;
+    const fullDate = parseDateStr(t.deadline).toLocaleDateString('uk-UA', { day: 'numeric', month: 'long', year: 'numeric' });
+    document.getElementById('detailTaskDeadline').innerHTML = `<i class="far fa-calendar-alt"></i> Дедлайн: <strong>${fullDate}</strong>`;
+    document.getElementById('detailTaskDesc').textContent = t.desc || 'Опис до цього завдання відсутній.';
+
+    if (!t.materials) t.materials = [];
+    renderFileList('detailTaskFilesList', t.materials, { type: 'task', taskId: t.id });
+
+    const btnAddFile = document.getElementById('btnAddTaskFile') || document.getElementById('btnAddDetailTaskFile');
+    if (btnAddFile) {
+        btnAddFile.onclick = () => triggerFileUpload('task', t.id);
+        btnAddFile.style.display = isAdmin() ? 'inline-flex' : 'none';
+    }
+
+    const btnAddDrive = document.getElementById('btnAddTaskDriveLink');
+    if (btnAddDrive) {
+        btnAddDrive.onclick = () => addTaskDriveLink(t.id);
+        btnAddDrive.style.display = isAdmin() ? 'inline-flex' : 'none';
+    }
+
+    const toggleBtn = document.getElementById('detailBtnToggleStatus');
+    toggleBtn.className = `btn ${t.completed ? 'btn-outline' : 'btn-primary'}`;
+    toggleBtn.innerHTML = t.completed ? '<i class="fas fa-undo"></i> Відновити завдання' : '<i class="fas fa-check"></i> Виконати завдання';
+    toggleBtn.onclick = () => {
+        toggleTaskStatus(t.id);
+        openTaskDetailsModal(t.id);
+    };
+
+    const editBtn = document.getElementById('detailBtnEdit');
+    const delBtn = document.getElementById('detailBtnDelete');
+
+    if (editBtn) {
+        editBtn.style.display = isAdmin() ? 'inline-block' : 'none';
+        editBtn.onclick = () => {
+            document.getElementById('taskDetailsModal').style.display = 'none';
+            openEditTaskModal(t.id);
+        };
+    }
+
+    if (delBtn) {
+        delBtn.style.display = isAdmin() ? 'inline-block' : 'none';
+        delBtn.onclick = () => {
+            confirmDelete(() => {
+                processDeleteTask(t.id);
+                document.getElementById('taskDetailsModal').style.display = 'none';
+            });
+        };
+    }
+
+    document.getElementById('taskDetailsModal').style.display = 'flex';
+}
+
+const closeTaskDetailsModal = document.getElementById('closeTaskDetailsModal');
+if(closeTaskDetailsModal) {
+    closeTaskDetailsModal.onclick = () => {
+        document.getElementById('taskDetailsModal').style.display = 'none';
+        state.currentDetailTaskId = null;
+    };
+}
+
+function toggleTaskStatus(id) {
+    const idx = state.completedTaskIds.indexOf(id);
+    if (idx > -1) {
+        state.completedTaskIds.splice(idx, 1);
+        showMobileToast("Завдання відновлено");
+    } else {
+        state.completedTaskIds.push(id);
+        showMobileToast("Завдання виконано! 🎉");
+    }
+    triggerHaptic(18);
+    syncTasksCompletion();
+    saveData();
+    renderTasks();
+    if (state.currentViewParams && state.currentViewParams.type === 'seminar') renderSeminarTasks(state.currentViewParams.name);
+}
+
+function processDeleteTask(id) {
+    if (!isAdmin()) { alert("Лише адміністратор може видаляти завдання."); return; }
+    const t = state.tasks.find(x => x.id === id);
+    if(t && t.materials) {
+        t.materials.forEach(f => {
+            if(!f.id.startsWith('lnk_') && !f.id.startsWith('gdrive_')) deleteFileFromDB(f.id);
+        });
+    }
+    state.tasks = state.tasks.filter(x => x.id !== id);
+    state.completedTaskIds = state.completedTaskIds.filter(x => x !== id);
+    saveData();
+    renderTasks();
+    renderSeminarsGrid();
+    if (state.currentViewParams && state.currentViewParams.type === 'seminar') renderSeminarTasks(state.currentViewParams.name);
+}
+
+const btnAddTask = document.getElementById('btnAddTask');
+if(btnAddTask) {
+    btnAddTask.onclick = () => {
+        if (!isAdmin()) { alert("Лише адміністратор може створювати завдання."); return; }
+        document.getElementById('taskForm').reset();
+        document.getElementById('editTaskId').value = '';
+        document.getElementById('taskModalTitle').textContent = 'Нове завдання';
+        document.getElementById('taskModal').style.display = 'flex';
+    };
+}
+
+function openEditTaskModal(id) {
+    if (!isAdmin()) return;
+    const t = state.tasks.find(x => x.id === id); if(!t) return;
+    document.getElementById('editTaskId').value = t.id;
+    document.getElementById('taskSubject').value = t.subject;
+    document.getElementById('taskType').value = t.type || 'Завдання';
+    document.getElementById('taskTitle').value = t.title;
+    document.getElementById('taskDesc').value = t.desc;
+    document.getElementById('taskDeadline').value = t.deadline;
+    document.getElementById('taskStatus').value = t.completed ? 'completed' : 'pending';
+    document.getElementById('taskModalTitle').textContent = 'Редагувати завдання';
+    document.getElementById('taskModal').style.display = 'flex';
+}
+
+const closeTaskModal = document.getElementById('closeTaskModal');
+if(closeTaskModal) closeTaskModal.onclick = () => document.getElementById('taskModal').style.display = 'none';
+
+const taskForm = document.getElementById('taskForm');
+if(taskForm) {
+    taskForm.onsubmit = (e) => {
+        e.preventDefault();
+        if (!isAdmin()) { alert("У вас немає прав на додавання або редагування завдань."); return; }
+
+        const isEditId = document.getElementById('editTaskId').value;
+        const taskData = {
+            subject: document.getElementById('taskSubject').value,
+            type: document.getElementById('taskType').value,
+            title: document.getElementById('taskTitle').value,
+            desc: document.getElementById('taskDesc').value,
+            deadline: document.getElementById('taskDeadline').value
+        };
+
+        if (isEditId) {
+            const t = state.tasks.find(x => x.id == isEditId);
+            if (t) Object.assign(t, taskData);
+        } else {
+            const newId = Date.now();
+            state.tasks.push({ id: newId, ...taskData, materials: [], completed: false });
+        }
+        saveData();
+        renderTasks();
+        renderSeminarsGrid();
+        if (state.currentViewParams && state.currentViewParams.type === 'seminar') renderSeminarTasks(state.currentViewParams.name);
+        document.getElementById('taskModal').style.display = 'none';
+        showMobileToast("Завдання збережено ✓");
+    };
+}
+
+const taskSearchInput = document.getElementById('taskSearchInput');
+if(taskSearchInput) taskSearchInput.addEventListener('input', (e) => { state.taskSearch = e.target.value; renderTasks(); });
+const taskSortSelect = document.getElementById('taskSortSelect');
+if(taskSortSelect) taskSortSelect.addEventListener('change', (e) => { state.taskSort = e.target.value; renderTasks(); });
+document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.onclick = (e) => {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+        state.taskFilter = e.target.dataset.filter;
+        renderTasks();
+        triggerHaptic(10);
+    };
+});
+
+window.addEventListener('click', (e) => {
+    if (e.target.classList.contains('modal')) {
+        e.target.style.display = 'none';
+        if (e.target.id === 'taskDetailsModal') state.currentDetailTaskId = null;
+        if (e.target.id === 'viewerModal') document.getElementById('viewerBody').innerHTML = '';
+    }
+});
+
+// ==================== 14. ПІДТВЕРДЖЕННЯ ВИДАЛЕННЯ ====================
+let pendingDeleteAction = null;
+function confirmDelete(actionFn) {
+    if (!isAdmin()) { alert("Лише адміністратор може видаляти матеріали."); return; }
+    pendingDeleteAction = actionFn;
+    document.getElementById('deleteConfirmModal').style.display = 'flex';
+}
+const btnCancelDelete = document.getElementById('btnCancelDelete');
+if(btnCancelDelete) btnCancelDelete.onclick = () => { pendingDeleteAction = null; document.getElementById('deleteConfirmModal').style.display = 'none'; };
+const btnConfirmDelete = document.getElementById('btnConfirmDelete');
+if(btnConfirmDelete) btnConfirmDelete.onclick = () => { if(pendingDeleteAction) pendingDeleteAction(); document.getElementById('deleteConfirmModal').style.display = 'none'; pendingDeleteAction = null; };
+
+// ==================== 15. НАЛАШТУВАННЯ ТА ТЕМА ====================
+function setupEventListeners() {
+    const btnUpper = document.getElementById('btnUpperWeek');
+    if(btnUpper) btnUpper.onclick = (e) => switchWeek('upper', e.target);
+    const btnLower = document.getElementById('btnLowerWeek');
+    if(btnLower) btnLower.onclick = (e) => switchWeek('lower', e.target);
+    if(state.weekType === 'lower') {
+        if(btnLower) btnLower.classList.add('active');
+        if(btnUpper) btnUpper.classList.remove('active');
+    }
+
+    const btnSaveSet = document.getElementById('btnSaveSettings');
+    if(btnSaveSet) {
+        btnSaveSet.onclick = () => {
+            const setStudentName = document.getElementById('setStudentName');
+            if (setStudentName) state.settings.name = setStudentName.value;
+            state.settings.darkTheme = document.getElementById('themeToggle').checked;
+            if(state.settings.darkTheme) document.documentElement.setAttribute('data-theme', 'dark'); else document.documentElement.removeAttribute('data-theme');
+            saveData(); updateDateAndTime(); renderSchedule(); showMobileToast('Налаштування збережено ✓');
+        };
+    }
+}
+
+function switchWeek(type, btn) {
+    state.weekType = type;
+    document.querySelectorAll('.btn-toggle').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    else {
+        const activeBtn = document.getElementById(type === 'upper' ? 'btnUpperWeek' : 'btnLowerWeek');
+        if (activeBtn) activeBtn.classList.add('active');
+    }
+    saveData();
+    renderSchedule();
+    updateDateAndTime();
+    triggerHaptic(12);
+    showMobileToast(type === 'upper' ? 'Тиждень 1' : 'Тиждень 2');
+}
+
+function initSettings() {
+    const setStudentName = document.getElementById('setStudentName');
+    if (setStudentName) setStudentName.value = state.settings.name || 'Студент';
+    const themeToggle = document.getElementById('themeToggle');
+    if (themeToggle && state.settings.darkTheme) {
+        themeToggle.checked = true;
+        document.documentElement.setAttribute('data-theme', 'dark');
+    }
+}
+
+// ==================== 16. НАТИВНІ МОБІЛЬНІ СВАЙПИ ТА UX ====================
+function triggerHaptic(ms = 12) {
+    if (navigator.vibrate) {
+        try { navigator.vibrate(ms); } catch (e) {}
+    }
+}
+
+function showMobileToast(message) {
+    let toast = document.getElementById('mobileToastNotification');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'mobileToastNotification';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.classList.add('show');
+    clearTimeout(toast._hideTimer);
+    toast._hideTimer = setTimeout(() => toast.classList.remove('show'), 2200);
+}
+
+function injectMobileUXStyles() {
+    if (document.getElementById('nativeMobileSwipeStyles')) return;
+    const style = document.createElement('style');
+    style.id = 'nativeMobileSwipeStyles';
+    style.textContent = `
+        @media (max-width: 768px) {
+            #scheduleContainer {
+                scroll-snap-type: x mandatory;
+                -webkit-overflow-scrolling: touch;
+                scroll-behavior: smooth;
+                scrollbar-width: none;
+            }
+            #scheduleContainer::-webkit-scrollbar { display: none; }
+            #scheduleContainer .day-card {
+                scroll-snap-align: center;
+                scroll-snap-stop: always;
+            }
+            .mobile-day-pills {
+                display: flex;
+                justify-content: space-between;
+                gap: 6px;
+                margin-bottom: 12px;
+                padding: 4px;
+                background: var(--card-bg, #fff);
+                border: 1px solid var(--border-color, rgba(0,0,0,0.08));
+                border-radius: 12px;
+            }
+            .mobile-day-pill {
+                flex: 1;
+                text-align: center;
+                padding: 7px 0;
+                font-size: 13px;
+                font-weight: 600;
+                border-radius: 9px;
+                color: var(--text-muted, #6c757d);
+                cursor: pointer;
+                transition: all 0.2s ease;
+                user-select: none;
+            }
+            .mobile-day-pill.active {
+                background: var(--primary-color, #4361ee);
+                color: #fff;
+                box-shadow: 0 2px 8px rgba(67, 97, 238, 0.3);
+            }
+            .mobile-day-pill.today-dot::after {
+                content: '';
+                display: block;
+                width: 4px;
+                height: 4px;
+                border-radius: 50%;
+                background: currentColor;
+                margin: 2px auto 0;
+            }
+        }
+        @media (min-width: 769px) {
+            .mobile-day-pills { display: none !important; }
+        }
+        #mobileSidebarBackdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.45);
+            backdrop-filter: blur(2px);
+            z-index: 998;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s ease;
+        }
+        #mobileSidebarBackdrop.visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        #mobileToastNotification {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(20px);
+            background: rgba(25, 28, 36, 0.92);
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 50px;
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 9999;
+            opacity: 0;
+            pointer-events: none;
+            transition: all 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+            white-space: nowrap;
+        }
+        #mobileToastNotification.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function toggleSidebarMobile(open) {
+    const sb = document.getElementById('sidebar');
+    if (!sb) return;
+    let backdrop = document.getElementById('mobileSidebarBackdrop');
+    if (!backdrop) {
+        backdrop = document.createElement('div');
+        backdrop.id = 'mobileSidebarBackdrop';
+        backdrop.onclick = () => toggleSidebarMobile(false);
+        document.body.appendChild(backdrop);
+    }
+    if (open) {
+        sb.classList.add('open');
+        backdrop.classList.add('visible');
+    } else {
+        sb.classList.remove('open');
+        backdrop.classList.remove('visible');
+    }
+}
+
+function renderMobileDayPills(scheduleContainer, shortDays, todayIndex) {
+    let pillsBar = document.getElementById('mobileDayPillsBar');
+    if (!pillsBar) {
+        pillsBar = document.createElement('div');
+        pillsBar.id = 'mobileDayPillsBar';
+        pillsBar.className = 'mobile-day-pills';
+        scheduleContainer.parentNode.insertBefore(pillsBar, scheduleContainer);
+    }
+
+    pillsBar.innerHTML = shortDays.map((label, idx) => `
+        <div class="mobile-day-pill ${idx === todayIndex ? 'active today-dot' : ''}" data-pill-day="${idx}">
+            ${label}
+        </div>
+    `).join('');
+
+    pillsBar.querySelectorAll('.mobile-day-pill').forEach(pill => {
+        pill.onclick = () => {
+            const idx = Number(pill.dataset.pillDay);
+            scrollToScheduleDay(idx, true);
+            triggerHaptic(8);
+        };
+    });
+
+    if (!scheduleContainer._hasScrollListener) {
+        scheduleContainer._hasScrollListener = true;
+        let scrollTimeout;
+        scheduleContainer.addEventListener('scroll', () => {
+            clearTimeout(scrollTimeout);
+            scrollTimeout = setTimeout(() => {
+                const cards = scheduleContainer.querySelectorAll('.day-card');
+                const center = scheduleContainer.scrollLeft + scheduleContainer.clientWidth / 2;
+                let closestIdx = 0;
+                let minDistance = Infinity;
+                cards.forEach((card, i) => {
+                    const cardCenter = card.offsetLeft - scheduleContainer.offsetLeft + card.clientWidth / 2;
+                    const dist = Math.abs(center - cardCenter);
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        closestIdx = i;
+                    }
+                });
+                const allPills = document.querySelectorAll('#mobileDayPillsBar .mobile-day-pill');
+                allPills.forEach((p, i) => p.classList.toggle('active', i === closestIdx));
+            }, 60);
+        }, { passive: true });
+    }
+}
+
+function scrollToScheduleDay(dayIndex, smooth = true) {
+    const container = document.getElementById('scheduleContainer');
+    const card = document.getElementById(`day-card-${dayIndex}`);
+    if (!container || !card) return;
+    const scrollLeft = card.offsetLeft - container.offsetLeft - (container.clientWidth - card.clientWidth) / 2;
+    container.scrollTo({ left: Math.max(0, scrollLeft), behavior: smooth ? 'smooth' : 'auto' });
+
+    const allPills = document.querySelectorAll('#mobileDayPillsBar .mobile-day-pill');
+    allPills.forEach((p, i) => p.classList.toggle('active', i === dayIndex));
+}
+
+function isDetailSubpageOpen() {
+    const subIds = ['subject-details', 'seminar-details', 'day-details'];
+    return subIds.some(id => {
+        const el = document.getElementById(id);
+        return el && el.classList.contains('active');
+    });
+}
+
+function handleBackSwipeNavigation() {
+    const subjDet = document.getElementById('subject-details');
+    if (subjDet && subjDet.classList.contains('active') && btnBackToSubjects) {
+        btnBackToSubjects.click();
+        triggerHaptic(15);
+        return true;
+    }
+    const semDet = document.getElementById('seminar-details');
+    if (semDet && semDet.classList.contains('active') && btnBackToSeminars) {
+        btnBackToSeminars.click();
+        triggerHaptic(15);
+        return true;
+    }
+    const dayDet = document.getElementById('day-details');
+    if (dayDet && dayDet.classList.contains('active') && btnBackToCalendar) {
+        btnBackToCalendar.click();
+        triggerHaptic(15);
+        return true;
+    }
+    return false;
+}
+
+function isAnyModalOpen() {
+    return Array.from(document.querySelectorAll('.modal')).some(m => m.style.display === 'flex' || m.style.display === 'block');
+}
+
+function setupMobileGestures() {
+    let startX = 0;
+    let startY = 0;
+    let startTime = 0;
+    let touchTarget = null;
+
+    document.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) return;
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+        startTime = Date.now();
+        touchTarget = e.target;
+    }, { passive: true });
+
+    document.addEventListener('touchend', (e) => {
+        if (!touchTarget || e.changedTouches.length !== 1) return;
+        const endX = e.changedTouches[0].clientX;
+        const endY = e.changedTouches[0].clientY;
+        const dx = endX - startX;
+        const dy = endY - startY;
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
+        const elapsed = Date.now() - startTime;
+
+        if (elapsed > 650 || absDy > absDx * 0.85) return;
+
+        const sb = document.getElementById('sidebar');
+        const isSidebarOpen = sb && sb.classList.contains('open');
+
+        if (isSidebarOpen && dx < -55) {
+            toggleSidebarMobile(false);
+            triggerHaptic(10);
+            return;
+        }
+
+        if (isAnyModalOpen()) return;
+
+        if (startX <= 36 && dx > 65) {
+            if (isDetailSubpageOpen()) {
+                handleBackSwipeNavigation();
+            } else {
+                toggleSidebarMobile(true);
+                triggerHaptic(12);
+            }
+            return;
+        }
+
+        const calSec = document.getElementById('calendar');
+        if (calSec && calSec.classList.contains('active') && touchTarget.closest('#calendar')) {
+            if (absDx > 60) {
+                changeCalendarMonth(dx < 0 ? 1 : -1);
+                return;
+            }
+        }
+
+        const tasksSec = document.getElementById('tasks');
+        if (tasksSec && tasksSec.classList.contains('active') && touchTarget.closest('#tasks')) {
+            if (touchTarget.tagName === 'INPUT' || touchTarget.tagName === 'SELECT') return;
+            if (absDx > 75) {
+                const filterButtons = Array.from(document.querySelectorAll('.filter-btn'));
+                if (filterButtons.length > 1) {
+                    const currentIdx = filterButtons.findIndex(b => b.classList.contains('active'));
+                    const nextIdx = dx < 0 ? currentIdx + 1 : currentIdx - 1;
+                    if (nextIdx >= 0 && nextIdx < filterButtons.length) {
+                        filterButtons[nextIdx].click();
+                        showMobileToast(`Фільтр: ${filterButtons[nextIdx].textContent.trim()}`);
+                    }
+                }
+                return;
+            }
+        }
+    }, { passive: true });
+}
